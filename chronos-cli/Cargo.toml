@@ -1,0 +1,15 @@
+[package]
+name = "chronos-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chronos-proto = { path = "../chronos-proto" }
+chronos-engine = { path = "../chronos-engine" }
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

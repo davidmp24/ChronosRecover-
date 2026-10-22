@@ -1,0 +1,313 @@
+syntax = "proto3";
+
+package chronos.recovery.v1;
+
+service RecoveryEngine {
+  // Device Enumeration & Info
+  rpc ListDevices (Empty) returns (DeviceListResponse);
+  rpc GetDeviceInfo (DevicePathRequest) returns (DeviceInfo);
+
+  // Scan Lifecycle Control
+  rpc StartScan (ScanRequest) returns (stream ScanProgressEvent);
+  rpc PauseScan (SessionControlRequest) returns (StatusResponse);
+  rpc ResumeScan (SessionControlRequest) returns (stream ScanProgressEvent);
+  rpc CancelScan (SessionControlRequest) returns (StatusResponse);
+
+  // Data Querying & Forensic Timeline
+  rpc QueryDiscoveredFiles (FilterRequest) returns (PaginatedFileResponse);
+  rpc QueryDeviceHistory (HistoryFilterRequest) returns (TimelineResponse);
+  rpc PreviewFile (PreviewRequest) returns (FilePreviewChunk);
+
+  // Recovery Pipeline with Safety Enforcements
+  rpc ValidateRecoveryDestination (DestinationValidationRequest) returns (DestinationValidationResponse);
+  rpc RecoverFiles (RecoverRequest) returns (stream RecoveryProgressEvent);
+}
+
+message Empty {}
+
+enum DeviceType {
+  DEVICE_TYPE_UNKNOWN = 0;
+  DEVICE_TYPE_PHYSICAL_DISK = 1;
+  DEVICE_TYPE_LOGICAL_VOLUME = 2;
+  DEVICE_TYPE_DISK_IMAGE = 3;
+}
+
+enum BusType {
+  BUS_TYPE_UNKNOWN = 0;
+  BUS_TYPE_SCSI = 1;
+  BUS_TYPE_ATAPI = 2;
+  BUS_TYPE_ATA = 3;
+  BUS_TYPE_1394 = 4;
+  BUS_TYPE_SSA = 5;
+  BUS_TYPE_FIBRE = 6;
+  BUS_TYPE_USB = 7;
+  BUS_TYPE_RAID = 8;
+  BUS_TYPE_ISCSI = 9;
+  BUS_TYPE_SAS = 10;
+  BUS_TYPE_SATA = 11;
+  BUS_TYPE_SD = 12;
+  BUS_TYPE_MMC = 13;
+  BUS_TYPE_NVME = 14;
+}
+
+message PartitionInfo {
+  uint32 index = 1;
+  uint64 start_lba = 2;
+  uint64 sector_count = 3;
+  uint64 size_bytes = 4;
+  string fs_type = 5;        // NTFS, FAT32, exFAT, EXT4, RAW
+  string label = 6;
+  string mount_point = 7;    // e.g. "E:\\" or "/media/usb"
+  string volume_guid = 8;
+  bool is_orphan = 9;        // Found via VBR/Superblock carving rather than partition table
+  uint32 cluster_size = 10;
+}
+
+message DeviceInfo {
+  string id = 1;             // Unique identifier (hash of serial + geometry)
+  string path = 2;           // Windows: \\.\PhysicalDrive1, Linux: /dev/sdb
+  string name = 3;           // e.g., "Samsung SSD 980 1TB" or "SanDisk Ultra USB 3.0"
+  string vendor = 4;
+  string product = 5;
+  string serial_number = 6;
+  DeviceType device_type = 7;
+  BusType bus_type = 8;
+  bool is_removable = 9;
+  bool is_read_only = 10;
+  uint32 bytes_per_sector = 11;          // Logical sector size (usually 512)
+  uint32 bytes_per_physical_sector = 12; // Physical sector size (usually 4096)
+  uint64 total_sectors = 13;
+  uint64 total_bytes = 14;
+  repeated PartitionInfo partitions = 15;
+  uint32 physical_drive_number = 16;     // Physical drive index for safe export verification
+}
+
+message DeviceListResponse {
+  repeated DeviceInfo devices = 1;
+}
+
+message DevicePathRequest {
+  string path = 1;
+}
+
+enum ScanMode {
+  SCAN_MODE_QUICK_METADATA = 0; // Quick scan: MFT, FAT entries, EXT4 Inodes only
+  SCAN_MODE_DEEP_CARVING = 1;   // Raw file carving with SIMD Aho-Corasick on unallocated / raw
+  SCAN_MODE_FULL_FORENSIC = 2;  // Combined Quick Scan + Timeline ($UsnJrnl) + Deep Carving
+}
+
+message ScanRequest {
+  string device_path = 1;
+  ScanMode scan_mode = 2;
+  uint64 start_lba = 3;         // Optional start offset for partial/resume scans
+  uint64 end_lba = 4;           // 0 means end of device
+  repeated string enabled_carver_signatures = 5; // e.g., ["jpg", "png", "mp4", "pdf", "docx", "zip"]
+  bool extract_device_history = 6; // Parse $UsnJrnl, $LogFile, and Inode journals
+  string session_id = 7;        // Empty to create new session, or existing UUID to resume
+}
+
+message SessionControlRequest {
+  string session_id = 1;
+}
+
+message StatusResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+enum ScanStatus {
+  SCAN_STATUS_INITIALIZING = 0;
+  SCAN_STATUS_RUNNING = 1;
+  SCAN_STATUS_PAUSED = 2;
+  SCAN_STATUS_COMPLETED = 3;
+  SCAN_STATUS_CANCELLED = 4;
+  SCAN_STATUS_FAILED = 5;
+}
+
+message BadSectorRange {
+  uint64 start_lba = 1;
+  uint64 sector_count = 2;
+  int64 timestamp = 3;
+  string error_message = 4;
+}
+
+message ScanProgressEvent {
+  string session_id = 1;
+  ScanStatus status = 2;
+  uint64 current_lba = 3;
+  uint64 total_lba = 4;
+  double progress_percentage = 5;
+  double speed_mb_per_sec = 6;
+  uint64 bad_sectors_count = 7;
+  uint64 files_discovered_count = 8;
+  uint64 history_events_count = 9;
+  uint64 elapsed_seconds = 10;
+  uint64 estimated_remaining_seconds = 11;
+  string current_action = 12;      // "Reading MFT Entry #14050", "Carving LBA 0x028A0000"
+  repeated DiscoveredFile recent_files = 13;
+  repeated HistoryEvent recent_history = 14;
+  BadSectorRange last_bad_sector = 15;
+}
+
+enum FileStatus {
+  FILE_STATUS_ACTIVE = 0;
+  FILE_STATUS_DELETED = 1;
+  FILE_STATUS_ORPHAN = 2;
+  FILE_STATUS_CARVED = 3;
+}
+
+enum FileCategory {
+  FILE_CATEGORY_UNKNOWN = 0;
+  FILE_CATEGORY_DOCUMENT = 1;
+  FILE_CATEGORY_IMAGE = 2;
+  FILE_CATEGORY_VIDEO = 3;
+  FILE_CATEGORY_AUDIO = 4;
+  FILE_CATEGORY_ARCHIVE = 5;
+  FILE_CATEGORY_DATABASE = 6;
+  FILE_CATEGORY_SYSTEM = 7;
+}
+
+message DataRun {
+  uint64 cluster_offset = 1;
+  uint64 cluster_count = 2;
+}
+
+message DiscoveredFile {
+  string id = 1;
+  string session_id = 2;
+  uint32 partition_index = 3;
+  string path = 4;
+  string filename = 5;
+  string extension = 6;
+  uint64 size_bytes = 7;
+  FileStatus status = 8;
+  FileCategory category = 9;
+  string mime_type = 10;
+  int64 created_at = 11;
+  int64 modified_at = 12;
+  int64 accessed_at = 13;
+  int64 deleted_at = 14;
+  uint32 recoverability_score = 15; // 0 to 100 percentage based on $BITMAP collision check
+  bool is_directory = 16;
+  repeated DataRun data_runs = 17;
+  uint64 starting_lba = 18;
+  string md5_hash = 19;
+}
+
+message FilterRequest {
+  string session_id = 1;
+  string query = 2;                 // Text search on filename/path
+  repeated FileCategory categories = 3;
+  repeated FileStatus statuses = 4;
+  uint64 min_size_bytes = 5;
+  uint64 max_size_bytes = 6;
+  int64 modified_after = 7;
+  int64 modified_before = 8;
+  uint32 min_recoverability = 9;
+  uint32 page_number = 10;
+  uint32 page_size = 11;            // Virtual pagination support (e.g. 50-1000 items)
+  string sort_by = 12;              // "filename", "size", "modified", "recoverability"
+  bool sort_descending = 13;
+}
+
+message PaginatedFileResponse {
+  repeated DiscoveredFile files = 1;
+  uint64 total_matching_files = 2;
+  uint32 current_page = 3;
+  uint32 total_pages = 4;
+}
+
+enum HistoryEventType {
+  HISTORY_EVENT_UNKNOWN = 0;
+  HISTORY_EVENT_CREATED = 1;
+  HISTORY_EVENT_DELETED = 2;
+  HISTORY_EVENT_RENAMED = 3;
+  HISTORY_EVENT_DATA_EXTEND = 4;
+  HISTORY_EVENT_DATA_TRUNCATE = 5;
+  HISTORY_EVENT_SECURITY_CHANGE = 6;
+}
+
+message HistoryEvent {
+  string id = 1;
+  string session_id = 2;
+  int64 timestamp = 3;
+  HistoryEventType event_type = 4;
+  string source_path = 5;
+  string destination_path = 6;
+  uint64 usn = 7;
+  uint64 file_reference_number = 8;
+  string reason_flags = 9;
+  string details = 10;
+}
+
+message HistoryFilterRequest {
+  string session_id = 1;
+  string path_query = 2;
+  repeated HistoryEventType event_types = 3;
+  int64 start_timestamp = 4;
+  int64 end_timestamp = 5;
+  uint32 limit = 6;
+  uint32 offset = 7;
+}
+
+message TimelineResponse {
+  repeated HistoryEvent events = 1;
+  uint64 total_count = 2;
+}
+
+enum PreviewType {
+  PREVIEW_TYPE_HEX = 0;
+  PREVIEW_TYPE_IMAGE = 1;
+  PREVIEW_TYPE_TEXT = 2;
+  PREVIEW_TYPE_AUDIO = 3;
+  PREVIEW_TYPE_UNSUPPORTED = 4;
+}
+
+message PreviewRequest {
+  string file_id = 1;
+  uint32 max_bytes = 2; // Default 65536 (64 KB)
+}
+
+message FilePreviewChunk {
+  string file_id = 1;
+  uint64 total_size = 2;
+  PreviewType preview_type = 3;
+  bytes data = 4;
+  bool is_truncated = 5;
+  string mime_type = 6;
+}
+
+message DestinationValidationRequest {
+  string source_device_path = 1;
+  string target_directory_path = 2;
+}
+
+message DestinationValidationResponse {
+  bool is_safe = 1;
+  string reason = 2;
+  uint32 source_disk_number = 3;
+  uint32 target_disk_number = 4;
+  uint64 target_available_space_bytes = 5;
+}
+
+message RecoverRequest {
+  string session_id = 1;
+  repeated string file_ids = 2;
+  string destination_directory = 3;
+  bool preserve_directory_tree = 4;
+  bool overwrite_existing = 5;
+}
+
+message RecoveryProgressEvent {
+  string session_id = 1;
+  string current_file_id = 2;
+  string current_file_path = 3;
+  uint64 current_file_bytes_written = 4;
+  uint64 current_file_total_bytes = 5;
+  uint32 total_files_to_recover = 6;
+  uint32 files_recovered_so_far = 7;
+  uint32 files_failed_count = 8;
+  double overall_percentage = 9;
+  bool is_completed = 10;
+  string error_message = 11;
+}

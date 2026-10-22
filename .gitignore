@@ -1,0 +1,30 @@
+# Rust Cargo build artifacts
+/target/
+**/target/
+Cargo.lock
+
+# Node.js and Frontend artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database & forensic test images
+*.db
+*.db-wal
+*.db-shm
+*.img
+*.dd
+*.raw
+
+# OS and Editor temporary files
+.vscode/
+.idea/
+*.swp
+*.bak
+Thumbs.db
+.DS_Store
